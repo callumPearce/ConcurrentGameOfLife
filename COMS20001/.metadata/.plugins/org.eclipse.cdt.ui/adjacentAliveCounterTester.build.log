@@ -1,0 +1,12 @@
+16:55:31 **** Incremental Build of configuration Default for project adjacentAliveCounterTester ****
+xmake CONFIG=Default all 
+Checking build modules
+No build modules used.
+Analyzing adjacentAliveCounterTester.xc
+Creating dependencies for adjacentAliveCounterTester.xc
+Compiling adjacentAliveCounterTester.xc
+Creating adjacentAliveCounterTester.xe
+Build Complete
+
+16:55:32 Build Finished (took 1s.434ms)
+

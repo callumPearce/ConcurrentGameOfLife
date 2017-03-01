@@ -1,0 +1,13 @@
+15:05:55 **** Incremental Build of configuration Default for project channelCommunication ****
+xmake CONFIG=Default all 
+Checking build modules
+No build modules used.
+Analyzing channelCommunication.xc
+Propagating analysis
+Creating dependencies for channelCommunication.xc
+Compiling channelCommunication.xc
+Creating channelCommunication.xe
+Build Complete
+
+15:05:57 Build Finished (took 2s.809ms)
+

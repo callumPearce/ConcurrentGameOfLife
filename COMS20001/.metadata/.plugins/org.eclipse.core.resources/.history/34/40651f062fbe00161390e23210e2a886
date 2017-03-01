@@ -1,0 +1,717 @@
+// COMS20001 - Cellular Automaton Farm - Initial Code Skeleton
+// (using the XMOS i2c accelerometer demo code)
+
+#include <platform.h>
+#include <xs1.h>
+#include <stdio.h>
+#include "pgmIO.h"
+#include "i2c.h"
+#include <math.h>
+
+typedef unsigned char uchar;
+
+on tile[0]: in port buttons = XS1_PORT_4E;
+on tile[0]: out port leds = XS1_PORT_4F;
+
+#define  IMHT 64                  //image height
+#define  IMWD 64                  //image width
+
+#define  turns 100                 //Number of turns in the gameOfLife
+
+#define comSize 8
+#define comType uchar
+
+#define stream //streaming         //put "streaming" for asynch communication to workers, works with max 4 workers.
+
+#define IMWDwr IMWD/comSize
+
+#define coreNo 8                   //The number channels created for communication (either 2,4,8)
+#define sentNumber ((IMHT/coreNo) + 2)
+
+
+on tile[0]: port p_scl = XS1_PORT_1E;
+on tile[0]: port p_sda = XS1_PORT_1F;
+
+#define FXOS8700EQ_I2C_ADDR 0x1E
+#define FXOS8700EQ_XYZ_DATA_CFG_REG 0x0E
+#define FXOS8700EQ_CTRL_REG_1 0x2A
+#define FXOS8700EQ_DR_STATUS 0x0
+#define FXOS8700EQ_OUT_X_MSB 0x1
+#define FXOS8700EQ_OUT_X_LSB 0x2
+#define FXOS8700EQ_OUT_Y_MSB 0x3
+#define FXOS8700EQ_OUT_Y_LSB 0x4
+#define FXOS8700EQ_OUT_Z_MSB 0x5
+#define FXOS8700EQ_OUT_Z_LSB 0x6
+
+char infname[] = "test.pgm";     //put your input image path here
+char outfname[] = "testout.pgm"; //put your output image path here
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+// Read Image from PGM file from path infname[] to channel c_out
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+void DataInStream(char infname[], chanend c_out)
+{
+  int res;
+  uchar line[ IMWD ];
+  printf( "DataInStream: Start...\n" );
+
+  //Open PGM file
+  res = _openinpgm( infname, IMWD, IMHT );
+  if( res ) {
+    printf( "DataInStream: Error openening %s\n.", infname );
+    return;
+  }
+
+
+  //Read image line-by-line and send byte by byte to channel c_out
+  for( int y = 0; y < IMHT; y++ ) {
+    _readinline( line, IMWD );
+    for( int x = 0; x < IMWD; x++ ) {
+      c_out <: line[ x ];
+      //printf( "-%4.1d ", line[ x ] ); //show image values
+    }
+    //printf( "\n" );
+  }
+
+  //Close PGM image file
+  _closeinpgm();
+  printf( "DataInStream: Done...\n" );
+  return;
+}
+
+
+//READ BUTTONS and send button pattern to Distributor
+void buttonListener(in port b, chanend toDistributor) {
+  int r;
+  while (1) {
+    b when pinseq(15)  :> r;    // check that no button is pressed
+    b when pinsneq(15) :> r;    // check if some buttons are pressed
+    if ((r==13) || (r==14))     // if either button is pressed
+    toDistributor <: r;             // send button pattern to the Distributor
+  }
+}
+
+
+//Read pattern fromDistributor and send it to the LEDs
+int showLEDs(out port p, chanend fromDistributor) {
+  int pattern; //1st bit...separate green LED
+               //2nd bit...blue LED
+               //3rd bit...green LED
+               //4th bit...red LED
+  while (1) {
+    fromDistributor :> pattern;   //receive new pattern from visualiser
+    p <: pattern;                //send pattern to LED port
+  }
+  return 0;
+}
+
+
+//Pauses the game, displays number of processing rounds occured, current
+//number of live cells and time elapsed since image has been read in.
+void pauseGame(chanend fromAcc, comType world[IMWDwr][IMHT], chanend toLEDs, int processingRounds, uint32_t elapsedTime, uint32_t totalPausedTime){
+
+    toLEDs <: 8;
+
+    printf("Processing Rounds Completed: %d\n", processingRounds);
+
+    int cellCounter = 0;
+    for(int y = 0; y < IMHT; y++){
+      for(int x = 0; x < IMWDwr; x++){
+        comType wrappedVal = world[x][y];
+        int p = (int)(wrappedVal);
+        int r;
+        int counter = 0;
+        while(counter < comSize){
+          r = p % 2;
+          p = p / 2;
+          if(r == 1){
+            cellCounter++;
+          }
+          counter++;
+        }
+      }
+    }
+
+    printf("Current Number Of Live Cells: %d\n", cellCounter);
+
+    int elapsed = (elapsedTime - totalPausedTime)/100000;
+
+    printf("Total Processing Time: %u ms\n", elapsed);
+
+    int accValue = 1;
+    while(accValue == 1){
+        fromAcc :> accValue;
+    }
+
+    printf("\n");
+
+    toLEDs <: 4;
+}
+
+
+//Counts the number of live cells for a given xValue and yValue, both of which are unrapped values.
+int adjacentAliveCounter(comType lifeBoard[IMWDwr][sentNumber], int cellWidth, int cellHeight){
+    comType alive = (comType)(1);
+
+    int xUchar = cellWidth / comSize;
+    int positionInLine = cellWidth % comSize;
+
+    comType topLeft;
+    comType topRight;
+    comType top;
+    comType middleLeft;
+    comType middleRight;
+    comType bottomLeft;
+    comType bottomRight;
+    comType bottom;
+
+    int topHeight;
+    int middleHeight;
+    int bottomHeight;
+
+    middleHeight = cellHeight;
+
+    if(cellHeight == 0){
+        topHeight = sentNumber - 1;
+        bottomHeight = cellHeight + 1;
+    }
+
+    else if(cellHeight == sentNumber-1){
+        bottomHeight = 0;
+        topHeight = cellHeight - 1;
+    }
+
+    else{
+        bottomHeight = cellHeight + 1;
+        topHeight = cellHeight - 1;
+    }
+
+    comType topUchar;
+    comType bottomUchar;
+    comType middleUchar;
+    topUchar = lifeBoard[xUchar][topHeight];
+    middleUchar = lifeBoard[xUchar][middleHeight];
+    bottomUchar = lifeBoard[xUchar][bottomHeight];
+
+    if(positionInLine == 0){
+        comType leftTopUchar;
+        comType leftMiddleUchar;
+        comType leftBottomUchar;
+
+        if(xUchar == 0){
+            leftTopUchar = lifeBoard[IMWDwr-1][topHeight];
+            leftMiddleUchar = lifeBoard[IMWDwr-1][middleHeight];
+            leftBottomUchar = lifeBoard[IMWDwr-1][bottomHeight];
+        }
+
+        else{
+            leftTopUchar = lifeBoard[xUchar-1][topHeight];
+            leftMiddleUchar = lifeBoard[xUchar-1][middleHeight];
+            leftBottomUchar = lifeBoard[xUchar-1][bottomHeight];
+        }
+
+        topLeft = (leftTopUchar >> comSize-1) & 1;
+        top = (topUchar) & 1;
+        topRight = (topUchar >> 1) & 1;
+        middleLeft = (leftMiddleUchar >> comSize-1) & 1;
+        middleRight = (middleUchar >> 1) & 1;
+        bottomLeft = (leftBottomUchar >> comSize-1) & 1;
+        bottom = bottomUchar & 1;
+        bottomRight = (bottomUchar >> 1) & 1;
+
+    }
+
+    else if(positionInLine == comSize-1){
+        comType rightTopUchar;
+        comType rightMiddleUchar;
+        comType rightBottomUchar;
+
+        if(xUchar == IMWDwr-1){
+            rightTopUchar = lifeBoard[0][topHeight];
+            rightMiddleUchar = lifeBoard[0][middleHeight];
+            rightBottomUchar = lifeBoard[0][bottomHeight];
+        }
+
+        else{
+            rightTopUchar = lifeBoard[xUchar+1][topHeight];
+            rightMiddleUchar = lifeBoard[xUchar+1][middleHeight];
+            rightBottomUchar = lifeBoard[xUchar+1][bottomHeight];
+        }
+
+        topLeft = (topUchar >> comSize-2) & 1;
+        top = (topUchar >> comSize-1) & 1;
+        topRight = (rightTopUchar) & 1;
+        middleLeft = (middleUchar >> comSize-2) & 1;
+        middleRight = (rightMiddleUchar) & 1;
+        bottomLeft = (bottomUchar >> comSize-2) & 1;
+        bottom = (bottomUchar >> comSize-1) & 1;
+        bottomRight = (rightBottomUchar) & 1;
+
+    }
+
+    else{
+        topLeft = topUchar >> (positionInLine - 1) & 1;
+        top = topUchar >> (positionInLine) & 1;
+        topRight = topUchar >> (positionInLine + 1) & 1;
+        middleLeft = middleUchar >> (positionInLine - 1) & 1;
+        middleRight = middleUchar >> (positionInLine + 1) & 1;
+        bottomLeft = bottomUchar >> (positionInLine - 1) & 1;
+        bottom = bottomUchar >> (positionInLine) & 1;
+        bottomRight = bottomUchar >> (positionInLine + 1) & 1;
+    }
+
+    int counter = 0;
+
+    if(topLeft == alive)
+        counter++;
+    if(top == alive)
+        counter++;
+    if(topRight == alive)
+        counter++;
+    if(middleLeft == alive)
+        counter++;
+    if(middleRight == alive)
+        counter++;
+    if(bottomLeft == alive)
+        counter++;
+    if(bottom == alive)
+        counter++;
+    if(bottomRight == alive)
+        counter++;
+
+    return counter;
+}
+
+
+//Determines if a parsed in cell should be alive in the next generation.
+comType aliveNextGen(comType lifeBoard[IMWDwr][sentNumber], int cellHeight, int cellWidth){
+
+    comType dead = (comType)(0);
+    comType alive = (comType)(1);
+
+    int xUchar = cellWidth / comSize;
+    int positionInLine = cellWidth % comSize;
+
+    comType currentUchar = lifeBoard[xUchar][cellHeight];
+    comType currentCell = (currentUchar >> positionInLine) & 1;
+
+    int counter = adjacentAliveCounter(lifeBoard, cellWidth, cellHeight);
+
+    if(counter < 2){
+        return dead;
+    }
+    if(counter == 2 && currentCell == dead){
+        return dead;
+    }
+    if(counter == 2 && currentCell == alive){
+        return alive;
+    }
+    if(counter == 3){
+        return alive;
+    }
+    if(counter > 3){
+        return dead;
+    }
+
+}
+
+
+//Finds the correct sendArray to be sent to a worker
+void findSentArray(comType world[IMWDwr][IMHT], comType sentArray[IMWDwr][sentNumber], int line){
+
+        //Deals with top line of the world
+        if(line == 0){
+            int y = 1;
+            int k1 = 0;
+            while(y < sentNumber){
+                  for(int j = 0; j < IMWDwr; j++){
+                      sentArray[j][y] = world[j][line+k1];
+                  }
+                  y++;
+                  k1++;
+            }
+            for(int j = 0; j < IMWDwr; j++){
+                sentArray[j][0] = world[j][IMHT-1];
+            }
+        }
+
+        //Deals with bottom line of the world
+        else if(line == IMHT-1){
+            int y = 0;
+            int k2 = -1;
+            while(y < sentNumber-1){
+                  for(int j = 0; j < IMWDwr; j++){
+                      sentArray[j][y] = world[j][line+k2];
+                  }
+                  y++;
+                  k2++;
+            }
+            for(int j = 0; j < IMWDwr; j++){
+                sentArray[j][line+1] = world[j][0];
+            }
+        }
+
+        //Deals with rest of the cases
+        else{
+           //Creates the correct sendArray for rest of cases
+            int y = 0;
+            int k3 = -1;
+            while(y < sentNumber){
+                for(int j = 0; j < IMWDwr; j++){
+                    if(k3 +line > IMHT-1){
+                        k3 = 0;
+                        line = 0;
+                    }
+                    sentArray[j][y] = world[j][line+k3];
+                }
+                y++;
+                k3++;
+            }
+        }
+}
+
+
+//Sends the values of an array down a specific channel
+void sentArraySend(comType sentArray[IMWDwr][sentNumber],  stream chanend worker){
+    for(int y = 0; y < sentNumber; y++){
+        for(int x=0; x < IMWDwr; x++){
+            worker <: sentArray[x][y];
+        }
+    }
+}
+
+
+//Recieves the values of an array from a specific channel and builds the passed in array with them
+void sentArrayReceive(comType sentArray[IMWDwr][sentNumber],  stream chanend worker){
+    for(int y = 0; y < sentNumber; y++){
+            for(int x=0; x < IMWDwr; x++){
+                worker :> sentArray[x][y];
+
+            }
+        }
+}
+
+
+//WORKER: Finds the next generation for the given lines of the work send in to the workerIn Channel
+void findNextGenLine( stream chanend worker){
+    comType sentArray[IMWDwr][sentNumber];
+    sentArrayReceive(sentArray, worker);
+    comType nextGenLine[IMWDwr][sentNumber];
+    comType val;
+    comType alive = (comType)(1);
+    for(int y = 0; y < sentNumber; y++){
+        for(int x = 0; x < IMWDwr; x++){
+            int p = 0;
+            int z = 0;
+            for(int i = 0; i < comSize; i++){
+                z = 0;
+                val = aliveNextGen(sentArray, y, i + (comSize*x));
+                if(val == alive){
+                  z = 1;
+                }
+                p = p + ((int) pow((double) 2,i))*z;
+            }
+            comType wrappedCells = (comType)(p);
+            nextGenLine[x][y] = wrappedCells;
+        }
+    }
+    sentArraySend(nextGenLine, worker);
+}
+
+
+//Merges all of the results from the workers in to a single next generation world array.
+void createNextGenArray( stream chanend workers[coreNo], comType nextGenArray[IMWDwr][IMHT]){
+    comType nextGenLines[IMWDwr][sentNumber];
+    int i = 0;
+    for(int x=0; x < coreNo; x++){
+        sentArrayReceive(nextGenLines, workers[x]);
+        for(int y=1; y < sentNumber-1; y++){
+            for(int j=0; j < IMWDwr; j++){
+               nextGenArray[j][i] = nextGenLines[j][y];
+            }
+            i++;
+        }
+    }
+}
+
+
+//FARMER: Creates the next generation array from the current worlds state.
+void sendToWorkers(comType world[IMWDwr][IMHT],  stream chanend workers[coreNo]){
+    int x = 0;
+    int y = 0;
+    while(y < IMHT){
+        comType sentArray[IMWDwr][sentNumber];
+        findSentArray(world, sentArray,y);
+        sentArraySend(sentArray, workers[x]);
+        y = y + (sentNumber-2);
+        x++;
+    }
+
+    createNextGenArray(workers, world);
+}
+
+
+//Controls the flow of the game of life, read image, start processing and outputs image.
+void distributor(chanend c_in, chanend c_out, chanend fromAcc,  stream chanend workers[coreNo], chanend buttonsChan, chanend toLEDs){
+
+  uchar val;
+
+  //Initialisation below
+
+  int start = 0;
+  printf( "ProcessImage: Start, size = %dx%d\n", IMHT, IMWD );
+  printf( "Waiting for SW1 press...\n" );
+  while(start != 14){
+    buttonsChan :> start;
+  }
+
+  comType world[IMWDwr][IMHT];
+  for(int y = 0; y < IMHT; y++){
+      for(int x = 0; x < IMWDwr; x++){
+          world[x][y] = (comType)(0);
+      }
+  }
+
+  printf( "Reading...\n" );
+  int readingPattern = 1;
+  toLEDs <: readingPattern;
+
+
+  //Read in the world and wrap it
+  uchar alive = (uchar)(255);
+  for(int y = 0; y < IMHT; y++){
+      for(int x = 0; x < IMWDwr; x++){
+          int p = 0;
+          int z = 0;
+          for(int i = 0; i < comSize; i++){
+              z = 0;
+              c_in :> val;
+              uchar newval = (uchar)(val);
+              if(newval == alive){
+                z = 1;
+              }
+              p = p + ((int) pow((double) 2,i))*z;
+          }
+          comType wrappedCells = (comType)(p);
+          world[x][y] = wrappedCells;
+      }
+  }
+
+
+  int beginOutStream = 0;
+  int processingPattern = 4;
+
+  //Image processing code below
+
+  unsigned int startTime, currentTime, pausedTime, totalPausedTime;
+  pausedTime = 0;
+  totalPausedTime = 0;
+
+  timer t;
+  unsigned int start_time;
+  unsigned int end_time;
+  unsigned int period = 2*100000000;
+  unsigned int timeLast = 0;
+  t :> start_time;
+
+  for(int i = 0; i < turns; i++){
+
+      //t :> startTimeRound;
+
+      toLEDs <: processingPattern;
+      sendToWorkers(world, workers);
+
+      int buttonsVal;
+      int accVal;
+
+      select{
+          case buttonsChan :> buttonsVal:
+              if(buttonsVal == 13)
+                  beginOutStream = 1;
+                  break;
+
+          case fromAcc :> accVal:
+              if(accVal == 1){
+                  t :> currentTime;
+                  pauseGame(fromAcc, world, toLEDs, i+1, currentTime - startTime, totalPausedTime);
+                  t:> pausedTime;
+                  pausedTime = pausedTime - currentTime;
+                  totalPausedTime = totalPausedTime + pausedTime;
+              }
+              break;
+
+          case t when timerafter(start_time + period) :> void:
+              t:>start_time;
+              timeLast += 2;
+              break;
+
+          default:
+              break;
+      }
+
+      if(beginOutStream == 1){
+          break;
+      }
+
+      if(processingPattern == 4)
+          processingPattern = 0;
+      else
+          processingPattern = 4;
+
+      t :> end_time;
+
+      if(i == turns-1){
+          timeLast += (end_time - start_time)/100000000;
+      }
+  }
+  printf("\n");
+  printf("Total Processing Time: %u s\n",timeLast);
+
+
+  //Exporting code below
+  int exportPattern = 2;
+  toLEDs <: exportPattern;
+  for(int y = 0; y < IMHT; y++){
+    for(int x = 0; x < IMWDwr; x++){
+      comType wrappedVal = world[x][y];
+      int p = (int)(wrappedVal);
+      int r;
+      int counter = 0;
+      while(counter < comSize){
+        r = p % 2;
+        p = p / 2;
+        if(r == 1){
+          uchar alive = (uchar)(255);
+          c_out <: alive;
+        }
+        else{
+            uchar dead = (uchar)(0);
+          c_out <: dead;
+        }
+        counter++;
+      }
+    }
+  }
+  toLEDs <: 0;
+
+
+
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+// Write pixel stream from channel c_in to PGM image file
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+void DataOutStream(char outfname[], chanend c_in)
+{
+  int res;
+  uchar line[ IMWD ];
+
+  //Open PGM file
+  printf( "DataOutStream: Start...\n" );
+  res = _openoutpgm( outfname, IMWD, IMHT );
+  if( res ) {
+    printf( "DataOutStream: Error opening %s\n.", outfname );
+    return;
+  }
+
+  //Compile each line of the image and write the image line-by-line
+  for( int y = 0; y < IMHT; y++ ) {
+    for( int x = 0; x < IMWD; x++ ) {
+      c_in :> line[ x ];
+    }
+    _writeoutline( line, IMWD );
+    //printf( "DataOutStream: Line written...\n" );
+  }
+
+  //Close the PGM image
+  _closeoutpgm();
+  printf( "DataOutStream: Done...\n" );
+  return;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+// Initialise and  read orientation, send to distributor if board is tilted beyond 30 degrees
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+void orientation( client interface i2c_master_if i2c, chanend toDist) {
+  i2c_regop_res_t result;
+  char status_data = 0;
+  int tilted = 0;
+
+  // Configure FXOS8700EQ
+  result = i2c.write_reg(FXOS8700EQ_I2C_ADDR, FXOS8700EQ_XYZ_DATA_CFG_REG, 0x01);
+  if (result != I2C_REGOP_SUCCESS) {
+    printf("I2C write reg failed\n");
+  }
+  
+  // Enable FXOS8700EQ
+  result = i2c.write_reg(FXOS8700EQ_I2C_ADDR, FXOS8700EQ_CTRL_REG_1, 0x01);
+  if (result != I2C_REGOP_SUCCESS) {
+    printf("I2C write reg failed\n");
+  }
+
+  //Probe the orientation x-axis forever
+  while (1) {
+
+    //check until new orientation data is available
+    do {
+      status_data = i2c.read_reg(FXOS8700EQ_I2C_ADDR, FXOS8700EQ_DR_STATUS, result);
+    } while (!status_data & 0x08);
+
+    //get new x-axis tilt value
+    int x = read_acceleration(i2c, FXOS8700EQ_OUT_X_MSB);
+
+    //send signal to distributor after first tilt
+    if (x > 30 || x < (-30)) {
+      tilted = 1 - tilted;
+      toDist <: 1;
+    }
+    if(x <= 30 && x > (-30)){
+        toDist <: 0;
+    }
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+// Orchestrate concurrent system and start up all threads
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+
+int main(void) {
+
+i2c_master_if i2c[1];               //interface to orientation
+chan c_inIO, c_outIO, c_control;    //extend your channel definitions here
+stream chan workers[coreNo];
+chan toDistributorButton;
+chan fromDistributorLEDs;
+
+par {
+    on tile[0]: par (int x = 0; x < coreNo-3; x++){
+                    for(int i = 0; i < turns; i++){
+                        findNextGenLine(workers[x]);
+                    }
+                }
+
+    on tile[1]: par (int x = coreNo-3; x < coreNo; x++){
+                     for(int i = 0; i < turns; i++){
+                        findNextGenLine(workers[x]);
+                    }
+                }
+     on tile[0]: i2c_master(i2c, 1, p_scl, p_sda, 10);   //server thread providing orientation data
+     on tile[0]: orientation(i2c[0],c_control);        //client thread reading orientation data
+     on tile[1]: DataInStream(infname, c_inIO);          //thread to read in a PGM image
+     on tile[1]: DataOutStream(outfname, c_outIO);       //thread to write out a PGM image
+     on tile[1]: distributor(c_inIO, c_outIO, c_control, workers, toDistributorButton, fromDistributorLEDs);//thread to coordinate work on imag
+     on tile[0]: buttonListener(buttons, toDistributorButton);
+     on tile[0]: showLEDs(leds,fromDistributorLEDs);
+  }
+
+
+  return 0;
+}
